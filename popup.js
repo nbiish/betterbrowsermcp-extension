@@ -1,12 +1,12 @@
 /**
- * Better Browser MCP — popup UI
+ * Better Browser MCP — popup UI (v0.2.0 — multi-tab)
  *
- * Renders the list of configured agents (with their connection state
- * and bound-tab count), the add-agent form, and a per-tab "bind to
- * agent" picker for the current tab.
- *
- * State is read once on popup open, then refreshed on every status
- * broadcast from the service worker.
+ * Renders:
+ *   - Configured agents (with connection status, bound tab count)
+ *   - Add-agent form
+ *   - Per-tab binding picker
+ *   - Bound tabs list for the agent that owns the current tab, with
+ *     rename + set-active controls
  */
 
 const els = {
@@ -17,10 +17,12 @@ const els = {
   addUrl: document.getElementById("add-url"),
   addToken: document.getElementById("add-token"),
   addSubmit: document.getElementById("add-submit"),
+  agentTabs: document.getElementById("agent-tabs"),
+  agentTabsHeader: document.getElementById("agent-tabs-header"),
 };
 
 let currentTabId = null;
-let currentSnapshot = { agents: [], bindings: {} };
+let currentSnapshot = { agents: [], bindings: {}, tabsByAgent: {} };
 
 // ============================================================
 //  Helpers
@@ -52,6 +54,7 @@ function el(tag, props = {}, ...children) {
   for (const [k, v] of Object.entries(props)) {
     if (k === "class") node.className = v;
     else if (k === "text") node.textContent = v;
+    else if (k === "style" && typeof v === "object") Object.assign(node.style, v);
     else if (k.startsWith("on") && typeof v === "function") {
       node.addEventListener(k.slice(2).toLowerCase(), v);
     } else {
@@ -107,6 +110,8 @@ function renderThisTab() {
   els.thisTab.innerHTML = "";
   if (currentTabId === null) {
     els.thisTab.appendChild(el("div", { class: "empty", text: "No active tab." }));
+    els.agentTabsHeader.style.display = "none";
+    els.agentTabs.innerHTML = "";
     return;
   }
   const boundAgentId = currentSnapshot.bindings[currentTabId];
@@ -148,6 +153,60 @@ function renderThisTab() {
     }
     els.thisTab.appendChild(card);
   }
+
+  // Render the agent's bound tabs list
+  renderAgentTabs(boundAgentId);
+}
+
+function renderAgentTabs(agentId) {
+  els.agentTabs.innerHTML = "";
+  if (!agentId) {
+    els.agentTabsHeader.style.display = "none";
+    return;
+  }
+  const tabs = currentSnapshot.tabsByAgent[agentId] || [];
+  if (tabs.length === 0) {
+    els.agentTabsHeader.style.display = "none";
+    return;
+  }
+  els.agentTabsHeader.style.display = "";
+  els.agentTabsHeader.textContent = `Agent "${agentId}" — bound tabs`;
+  for (const t of tabs) {
+    const row = el("div", { class: `tab-row${t.isActive ? " active" : ""}` });
+    const labelInput = el("input", {
+      class: "tab-label-input",
+      type: "text",
+      value: t.label,
+    });
+    labelInput.addEventListener("change", async () => {
+      const newLabel = labelInput.value.trim() || "tab";
+      await sendMessage({ type: "renameTab", tabId: t.tabId, label: newLabel });
+      await refresh();
+    });
+    labelInput.addEventListener("click", (e) => e.stopPropagation());
+    const labelCell = el("div", { class: "tab-label" }, labelInput);
+    row.appendChild(labelCell);
+
+    if (!t.isActive) {
+      const activateBtn = el("button", { class: "ghost", text: "Set active", onclick: async (e) => {
+        e.stopPropagation();
+        await sendMessage({ type: "setActiveTab", agentId, tabId: t.tabId });
+        await refresh();
+      } });
+      row.appendChild(activateBtn);
+    } else {
+      row.appendChild(el("span", { class: "tab-meta", text: "active" }));
+    }
+
+    const unbindBtn = el("button", { class: "danger", text: "Unbind", onclick: async (e) => {
+      e.stopPropagation();
+      await sendMessage({ type: "unbind", tabId: t.tabId });
+      await refresh();
+    } });
+    row.appendChild(unbindBtn);
+
+    els.agentTabs.appendChild(row);
+  }
 }
 
 async function refresh() {
@@ -155,9 +214,13 @@ async function refresh() {
   currentTabId = tab ? tab.id : null;
   const status = await sendMessage({ type: "listAgents" });
   if (status?.ok) {
-    currentSnapshot = { agents: status.agents, bindings: status.bindings };
+    currentSnapshot = {
+      agents: status.agents,
+      bindings: status.bindings,
+      tabsByAgent: status.tabsByAgent || {},
+    };
   } else {
-    currentSnapshot = { agents: [], bindings: {} };
+    currentSnapshot = { agents: [], bindings: {}, tabsByAgent: {} };
   }
   renderAgents();
   renderThisTab();
@@ -194,7 +257,6 @@ els.addSubmit.addEventListener("click", async () => {
   await refresh();
 });
 
-// Auto-fill the URL when id/port change
 els.addId.addEventListener("input", () => {
   if (!els.addUrl.value) {
     const port = els.addPort.value.trim();
@@ -212,7 +274,11 @@ els.addPort.addEventListener("input", () => {
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === "status") {
-    currentSnapshot = { agents: msg.payload.agents, bindings: msg.payload.bindings };
+    currentSnapshot = {
+      agents: msg.payload.agents,
+      bindings: msg.payload.bindings,
+      tabsByAgent: msg.payload.tabsByAgent || {},
+    };
     renderAgents();
     renderThisTab();
   }
