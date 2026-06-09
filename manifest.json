@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Better Browser MCP",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Multi-agent browser automation with multi-tab support. Forks @browsermcp with configurable WebSocket endpoints, per-tab agent binding, and per-tab labels for multi-site workflows (e.g. Stripe + OpenAI console from one agent).",
   "minimum_chrome_version": "116",
   "icons": {
