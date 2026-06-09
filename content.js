@@ -303,11 +303,32 @@
   //  Message handler
   // ============================================================
 
+  /**
+   * The MCP server names tools with a "browser_" prefix
+   * (browser_click, browser_snapshot, etc.). The content script's
+   * switch is keyed on the un-prefixed name. This helper accepts
+   * either form and returns the un-prefixed name, so the case
+   * statements below stay readable.
+   *
+   * Unprefixed names that don't start with "browser_" pass through
+   * unchanged (getUrl, getTitle, getConsoleLogs, ping, etc.).
+   */
+  function stripBrowserPrefix(type) {
+    if (typeof type !== "string") return type;
+    return type.startsWith("browser_") ? type.slice("browser_".length) : type;
+  }
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     (async () => {
       try {
         let result;
-        switch (msg.type) {
+        // The MCP server sends messages with the full prefixed type
+        // (browser_click, browser_snapshot, browser_press_key, etc.) but
+        // the content script's switch is keyed on the un-prefixed name.
+        // stripBrowserPrefix() normalizes either form to the un-prefixed
+        // name so the case statements stay readable.
+        const m = stripBrowserPrefix(msg.type);
+        switch (m) {
           case "snapshot":
             result = { snapshot: captureSnapshot() };
             break;

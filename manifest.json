@@ -32,8 +32,7 @@
     "scripting"
   ],
   "host_permissions": [
-    "http://127.0.0.1/*",
-    "http://localhost/*"
+    "<all_urls>"
   ],
   "web_accessible_resources": [
     {
