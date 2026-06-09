@@ -192,6 +192,65 @@
   }
 
   // ============================================================
+  //  Clipboard capture (for "Click to copy" buttons like Stripe's
+  //  publishable/secret key copy buttons, GitHub PAT copy buttons,
+  //  AWS access key copy buttons, etc.)
+  //
+  //  Pattern: the page calls navigator.clipboard.writeText(value)
+  //  when the user clicks the copy button. We monkey-patch that
+  //  method to capture the value into a module-scoped variable
+  //  before passing through to the real API. The extension can
+  //  then read the captured value via the browser_copy_to_clipboard
+  //  tool.
+  //
+  //  This is more reliable than chrome.tabs.executeScript or
+  //  reading the clipboard from the extension (which requires
+  //  the page to be focused and a user gesture).
+  // ============================================================
+
+  let lastCopiedText = null;
+  let lastCopiedAt = 0;
+  const CLIPBOARD_CAPTURE_TTL_MS = 60_000; // 60s — enough for any reasonable tool call gap
+
+  (function patchClipboardWriteText() {
+    if (!navigator.clipboard || navigator.clipboard.writeText.__bbmcpPatched) {
+      return;
+    }
+    const original = navigator.clipboard.writeText.bind(navigator.clipboard);
+    navigator.clipboard.writeText = async function bbmcpPatchedWriteText(text) {
+      try {
+        lastCopiedText = String(text);
+        lastCopiedAt = Date.now();
+        // Also dispatch a DOM event so page-level handlers can see
+        // that the clipboard was written. Useful for tests and for
+        // any future integration that wants to react.
+        try {
+          window.dispatchEvent(
+            new CustomEvent("bbmcp-clipboard-write", { detail: { text } }),
+          );
+        } catch {
+          // ignore
+        }
+      } catch {
+        // ignore capture errors — we still want to fall through to write
+      }
+      return original(text);
+    };
+    navigator.clipboard.writeText.__bbmcpPatched = true;
+  })();
+
+  function getLastCopiedText() {
+    if (lastCopiedText === null) return null;
+    if (Date.now() - lastCopiedAt > CLIPBOARD_CAPTURE_TTL_MS) {
+      // Stale — clear so the next call returns null
+      lastCopiedText = null;
+      lastCopiedAt = 0;
+      return null;
+    }
+    return lastCopiedText;
+  }
+
+  // ============================================================
   //  DOM operations
   // ============================================================
 
@@ -260,6 +319,58 @@
     }
     el.dispatchEvent(new Event("change", { bubbles: true }));
     return { ok: true, selected: valueArr };
+  }
+
+  /**
+   * Click a "Click to copy" button and return the value the page
+   * wrote to the clipboard. The page's click handler calls
+   * navigator.clipboard.writeText(value) — we patched that method
+   * above to capture the value into `lastCopiedText`.
+   *
+   * Combined click+read in one tool call so there's no race between
+   * the click handler and the read.
+   */
+  async function clickAndReadClipboard(ref) {
+    const el = resolveRef(ref);
+    if (!el) {
+      return { ok: false, error: `ref "${ref}" not found (re-snapshot to get fresh refs)` };
+    }
+    if (!isVisible(el)) {
+      return { ok: false, error: `ref "${ref}" is not visible` };
+    }
+    // Snapshot the captured value before the click so we can detect
+    // whether the click handler actually wrote something new.
+    const before = lastCopiedAt;
+    el.scrollIntoView({ block: "center", inline: "center" });
+    await new Promise((r) => setTimeout(r, 30));
+    try {
+      el.click();
+    } catch (err) {
+      return { ok: false, error: `click failed: ${err.message || err}` };
+    }
+    // Some sites defer the clipboard write slightly (e.g. via
+    // requestAnimationFrame or a microtask). Wait up to 1.5s for
+    // a fresh capture.
+    const deadline = Date.now() + 1500;
+    let value = null;
+    while (Date.now() < deadline) {
+      if (lastCopiedAt > before) {
+        value = getLastCopiedText();
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (value === null) {
+      return {
+        ok: false,
+        error:
+          "clicked the element but no clipboard.writeText was observed within 1.5s. " +
+          "The site may use a different copy mechanism (e.g. document.execCommand('copy') or " +
+          "an out-of-page modal showing the value). " +
+          "lastCopiedAt=" + lastCopiedAt + " before=" + before,
+      };
+    }
+    return { ok: true, value, ref };
   }
 
   function pressKey(key) {
@@ -355,6 +466,13 @@
             break;
           case "getConsoleLogs":
             result = { logs: getConsoleLogs() };
+            break;
+          case "copyToClipboard":
+            // Click a "Click to copy" button and return the value
+            // the page wrote to the clipboard. Combined into one
+            // tool call to avoid the round-trip race between
+            // click and read.
+            result = await clickAndReadClipboard(msg.ref);
             break;
           case "ping":
             result = { pong: true, tabId: msg.tabId, url: getUrl() };
